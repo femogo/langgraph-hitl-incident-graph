@@ -1,0 +1,32 @@
+﻿# Python & uv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets & local config
+.env
+.env.*
+!.env.example
+
+# Testing, linting & caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local databases & runtime data (for upcoming milestones)
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# IDEs & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
