@@ -35,3 +35,4 @@ Thumbs.db
 .infra_state.json
 
 .incident_audit.jsonl
+.incident_checkpoints.sqlite*
