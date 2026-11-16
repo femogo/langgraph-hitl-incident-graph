@@ -30,3 +30,6 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Simulated infrastructure runtime state
+.infra_state.json
