@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 821 600" width="821" role="img" aria-label="uv run incident-responder respond &quot;Checkout is failing with 502 errors since this morning deploy&quot; --thread-id inc-0042">
+<rect width="821" height="600" rx="10" fill="#0d1117" stroke="#30363d"/>
+<path d="M0 34h821" stroke="#30363d"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/><circle cx="40" cy="17" r="6" fill="#febc2e"/><circle cx="60" cy="17" r="6" fill="#28c840"/>
+<text x="410.5" y="22" text-anchor="middle" fill="#8b949e" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12">uv run incident-responder respond &quot;Checkout is failing with 502 errors since this morning deploy&quot; --thread-id inc-0042</text>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,Liberation Mono,monospace" font-size="13" xml:space="preserve">
+<text x="18" y="52" fill="#7ee787" font-weight="600">$ uv run incident-responder respond "Checkout is failing with 502 errors since this morning deploy"</text>
+<text x="18" y="71" fill="#7ee787" font-weight="600">  --thread-id inc-0042</text>
+<text x="18" y="90" fill="#e6edf3">Incident thread: inc-0042</text>
+<text x="18" y="109" fill="#e6edf3">[...] Tool invoked: list_services</text>
+<text x="18" y="128" fill="#e6edf3">[...] Tool invoked: get_service_logs(service_name=payment-api, limit=10)</text>
+<text x="18" y="166" fill="#e6edf3">[Diagnosis]</text>
+<text x="18" y="185" fill="#e6edf3">The logs for `payment-api` indicate several issues that could be contributing to [...]</text>
+<text x="18" y="204" fill="#e6edf3">1. **High Memory Pressure**: The service is experiencing high memory pressure, with a pod [...]</text>
+<text x="18" y="242" fill="#e6edf3">[Proposed Remediation]</text>
+<text x="18" y="261" fill="#e6edf3">  Tool:    scale_service</text>
+<text x="18" y="280" fill="#e6edf3">  Args:    {'service_name': 'payment-api', 'replicas': 3}</text>
+<text x="18" y="299" fill="#e6edf3">  Reason:  The root cause is high memory usage leading to GC overhead limit exceeded errors, [...]</text>
+<text x="18" y="318" fill="#e6edf3">[Status] awaiting_approval</text>
+<text x="18" y="356" fill="#e6edf3">Approve remediation execution? [y/N]: y</text>
+<text x="18" y="375" fill="#e6edf3">Operator note (optional): Approved by on-call</text>
+<text x="18" y="394" fill="#e6edf3">[...] Tool invoked: scale_service(service_name=payment-api, replicas=3)</text>
+<text x="18" y="413" fill="#e6edf3">[...]</text>
+<text x="18" y="432" fill="#e6edf3">[Remediation] Executed MCP tool 'scale_service': {</text>
+<text x="18" y="451" fill="#e6edf3">[...]</text>
+<text x="18" y="470" fill="#e6edf3">  "replicas": 3,</text>
+<text x="18" y="489" fill="#e6edf3">  "status": "degraded",</text>
+<text x="18" y="508" fill="#e6edf3">  "message": "Scaled 'payment-api' from 2 to 3 replicas."</text>
+<text x="18" y="527" fill="#e6edf3">}</text>
+<text x="18" y="565" fill="#e6edf3">[Status] resolved</text>
+</g></svg>
