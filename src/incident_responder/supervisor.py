@@ -12,6 +12,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +22,7 @@ from mcp import ClientSession
 from pydantic import BaseModel, Field
 
 from incident_responder.config import get_settings
+from incident_responder.guardrails import ActionGuardrails, AuditLogger
 from incident_responder.mcp_tools import (
     call_mcp_tool,
     load_mcp_tool_groups,
@@ -35,11 +37,10 @@ from incident_responder.state import (
 KNOWN_SERVICES = ("payment-api", "auth-service", "inventory-db")
 
 DIAGNOSE_SYSTEM_PROMPT = (
-    "You are a Site Reliability Engineering (SRE) Diagnostics Subagent. "
-    "Investigate the reported incident using ONLY the provided read-only MCP tools "
-    "(list_services, get_service_status, get_service_logs). "
-    "Inspect the affected service's metrics and recent logs before writing a concise, "
-    "factual root-cause diagnosis identifying the exact service name and symptoms."
+    "You are an SRE Diagnostic Subagent. Investigate the reported incident using ONLY "
+    "the provided read-only MCP inspection tools (list_services, get_service_status, "
+    "get_service_logs). Check the affected service status and recent logs, then provide "
+    "a concise technical diagnosis identifying the service name, root cause, and key metrics."
 )
 
 REMEDIATION_SYSTEM_PROMPT = (
@@ -63,8 +64,6 @@ class RemediationProposal(BaseModel):
     )
     replicas: int | None = Field(
         default=None,
-        ge=1,
-        le=10,
         description="Target replica count (required only when tool is 'scale_service').",
     )
     reason: str = Field(
@@ -74,7 +73,7 @@ class RemediationProposal(BaseModel):
     def to_action_dict(self) -> dict[str, Any]:
         args: dict[str, Any] = {"service_name": self.service_name}
         if self.tool == "scale_service":
-            args["replicas"] = self.replicas or 4
+            args["replicas"] = self.replicas if self.replicas is not None else 4
         return {
             "tool": self.tool,
             "args": args,
@@ -98,6 +97,13 @@ def _detect_service_in_text(text: str) -> str | None:
         if svc in lowered:
             return svc
     return None
+
+
+def _thread_id_from_config(config: RunnableConfig | None) -> str:
+    if not config:
+        return "default"
+    configurable = config.get("configurable") or {}
+    return str(configurable.get("thread_id") or "default")
 
 
 def supervisor_node(state: IncidentState) -> dict[str, Any]:
@@ -175,10 +181,18 @@ def _make_diagnose_node(llm: BaseChatModel, read_tools: list[Any]):
     return diagnose_agent_node
 
 
-def _make_remediation_planner_node(llm: BaseChatModel):
+def _make_remediation_planner_node(
+    llm: BaseChatModel,
+    guardrails: ActionGuardrails,
+    audit_logger: AuditLogger,
+):
     structured_llm = llm.with_structured_output(RemediationProposal)
 
-    async def remediation_planner_node(state: IncidentState) -> dict[str, Any]:
+    async def remediation_planner_node(
+        state: IncidentState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
+        thread_id = _thread_id_from_config(config)
         summary = state.get("incident_summary", "")
         target = state.get("target_service") or "unknown-service"
         prompt_messages: list[BaseMessage] = [
@@ -193,16 +207,55 @@ def _make_remediation_planner_node(llm: BaseChatModel):
         ]
         proposal_obj: RemediationProposal = await structured_llm.ainvoke(prompt_messages)  # type: ignore[assignment]
         proposal = proposal_obj.to_action_dict()
+        service_name = proposal["args"]["service_name"]
+
+        audit_logger.log_event(
+            event="PROPOSED",
+            thread_id=thread_id,
+            service=service_name,
+            tool=proposal["tool"],
+            args=proposal["args"],
+            actor="planner",
+            details={"reason": proposal["reason"]},
+        )
+
+        verdict = guardrails.validate(
+            tool=proposal["tool"],
+            args=proposal["args"],
+            thread_id=thread_id,
+        )
+        if not verdict.allowed:
+            audit_logger.log_event(
+                event="GUARDRAIL_BLOCKED",
+                thread_id=thread_id,
+                service=service_name,
+                tool=proposal["tool"],
+                args=proposal["args"],
+                actor="guardrail",
+                details={"rule": verdict.rule, "reason": verdict.reason, "stage": "pre_approval"},
+            )
+            blocked_reply = AIMessage(
+                content=(
+                    f"[Guardrail Blocked] Proposal '{proposal['tool']}' on '{service_name}' "
+                    f"violated policy ({verdict.rule}): {verdict.reason}"
+                )
+            )
+            return {
+                "messages": [blocked_reply],
+                "target_service": service_name,
+                "proposed_action": None,
+                "resolution_status": "aborted",
+            }
 
         reply = AIMessage(
             content=(
-                f"[Proposal] Recommended '{proposal['tool']}' on '{proposal['args']['service_name']}' "
+                f"[Proposal] Recommended '{proposal['tool']}' on '{service_name}' "
                 f"({proposal['reason']}). Awaiting human operator approval."
             )
         )
         return {
             "messages": [reply],
-            "target_service": proposal["args"]["service_name"],
+            "target_service": service_name,
             "proposed_action": proposal,
             "resolution_status": "awaiting_approval",
         }
@@ -210,43 +263,67 @@ def _make_remediation_planner_node(llm: BaseChatModel):
     return remediation_planner_node
 
 
-def human_approval_node(state: IncidentState) -> dict[str, Any]:
-    """Pause execution via interrupt() until an operator approves or rejects proposed_action."""
-    proposed = state.get("proposed_action")
-    if not proposed:
-        return {}
+def _make_human_approval_node(audit_logger: AuditLogger):
+    def human_approval_node(state: IncidentState, config: RunnableConfig) -> dict[str, Any]:
+        """Pause execution via interrupt() until an operator approves or rejects proposed_action."""
+        proposed = state.get("proposed_action")
+        if not proposed:
+            return {}
 
-    decision = interrupt(
-        {
-            "type": "remediation_approval",
-            "target_service": state.get("target_service"),
-            "proposed_action": proposed,
-            "instructions": "Resume with Command(resume={'approved': True/False, 'note': '...'})",
-        }
-    )
+        thread_id = _thread_id_from_config(config)
+        service_name = str(proposed.get("args", {}).get("service_name") or state.get("target_service"))
 
-    if isinstance(decision, dict):
-        approved = bool(decision.get("approved", False))
-        note = str(decision.get("note", "")).strip()
-    else:
-        approved = bool(decision)
-        note = ""
+        decision = interrupt(
+            {
+                "type": "remediation_approval",
+                "target_service": state.get("target_service"),
+                "proposed_action": proposed,
+                "instructions": "Resume with Command(resume={'approved': True/False, 'note': '...'})",
+            }
+        )
 
-    suffix = f" Note: {note}" if note else ""
-    if approved:
+        if isinstance(decision, dict):
+            approved = bool(decision.get("approved", False))
+            note = str(decision.get("note", "")).strip()
+        else:
+            approved = bool(decision)
+            note = ""
+
+        suffix = f" Note: {note}" if note else ""
+        if approved:
+            audit_logger.log_event(
+                event="APPROVED",
+                thread_id=thread_id,
+                service=service_name,
+                tool=str(proposed["tool"]),
+                args=dict(proposed.get("args") or {}),
+                actor="human",
+                details={"note": note},
+            )
+            return {
+                "messages": [
+                    AIMessage(content=f"[HITL] Operator APPROVED '{proposed['tool']}'.{suffix}")
+                ],
+                "resolution_status": "awaiting_approval",
+            }
+
+        audit_logger.log_event(
+            event="REJECTED",
+            thread_id=thread_id,
+            service=service_name,
+            tool=str(proposed["tool"]),
+            args=dict(proposed.get("args") or {}),
+            actor="human",
+            details={"note": note},
+        )
         return {
             "messages": [
-                AIMessage(content=f"[HITL] Operator APPROVED '{proposed['tool']}'.{suffix}")
+                AIMessage(content=f"[HITL] Operator REJECTED '{proposed['tool']}'.{suffix}")
             ],
-            "resolution_status": "awaiting_approval",
+            "resolution_status": "aborted",
         }
 
-    return {
-        "messages": [
-            AIMessage(content=f"[HITL] Operator REJECTED '{proposed['tool']}'.{suffix}")
-        ],
-        "resolution_status": "aborted",
-    }
+    return human_approval_node
 
 
 def route_after_approval(
@@ -260,15 +337,73 @@ def route_after_approval(
     return "execute_remediation"
 
 
-def _make_live_execute_node(session: ClientSession):
-    async def execute_remediation_node(state: IncidentState) -> dict[str, Any]:
+def _make_live_execute_node(
+    session: ClientSession,
+    guardrails: ActionGuardrails,
+    audit_logger: AuditLogger,
+):
+    async def execute_remediation_node(
+        state: IncidentState,
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
         proposed = state.get("proposed_action")
         if not proposed:
             return {"resolution_status": "aborted"}
 
+        thread_id = _thread_id_from_config(config)
         tool_name = str(proposed["tool"])
         args = dict(proposed.get("args") or {})
-        raw_result = await call_mcp_tool(session, tool_name, args)
+        service_name = str(args.get("service_name") or state.get("target_service") or "")
+
+        # Defense-in-depth guardrail check right before mutating infrastructure
+        verdict = guardrails.validate(tool=tool_name, args=args, thread_id=thread_id)
+        if not verdict.allowed:
+            audit_logger.log_event(
+                event="GUARDRAIL_BLOCKED",
+                thread_id=thread_id,
+                service=service_name,
+                tool=tool_name,
+                args=args,
+                actor="guardrail",
+                details={"rule": verdict.rule, "reason": verdict.reason, "stage": "pre_execution"},
+            )
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"[Guardrail Blocked] Execution of '{tool_name}' on '{service_name}' "
+                            f"aborted ({verdict.rule}): {verdict.reason}"
+                        )
+                    )
+                ],
+                "proposed_action": None,
+                "resolution_status": "aborted",
+            }
+
+        try:
+            raw_result = await call_mcp_tool(session, tool_name, args)
+        except Exception as exc:
+            audit_logger.log_event(
+                event="EXECUTION_FAILED",
+                thread_id=thread_id,
+                service=service_name,
+                tool=tool_name,
+                args=args,
+                actor="executor",
+                details={"error": str(exc)},
+            )
+            raise
+
+        guardrails.record_execution(tool=tool_name, args=args, thread_id=thread_id)
+        audit_logger.log_event(
+            event="EXECUTED",
+            thread_id=thread_id,
+            service=service_name,
+            tool=tool_name,
+            args=args,
+            actor="executor",
+            details={"result": str(raw_result)},
+        )
 
         reply = AIMessage(
             content=f"[Remediation] Executed MCP tool '{tool_name}': {raw_result}"
@@ -300,17 +435,27 @@ async def build_supervisor_graph(
     session: ClientSession,
     llm: BaseChatModel | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    guardrails: ActionGuardrails | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> CompiledStateGraph[Any]:
-    """Compile the Supervisor multi-agent graph wired to live MCP tools and ChatOllama."""
+    """Compile the Supervisor multi-agent graph wired to live MCP tools, guardrails, and audit log."""
     active_llm = llm or get_chat_model()
+    active_guardrails = guardrails or ActionGuardrails()
+    active_audit = audit_logger or AuditLogger()
     read_tools, _write_tools = await load_mcp_tool_groups(session)
 
     builder = StateGraph(IncidentState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("diagnose_agent", _make_diagnose_node(active_llm, read_tools))
-    builder.add_node("remediation_planner", _make_remediation_planner_node(active_llm))
-    builder.add_node("human_approval", human_approval_node)
-    builder.add_node("execute_remediation", _make_live_execute_node(session))
+    builder.add_node(
+        "remediation_planner",
+        _make_remediation_planner_node(active_llm, active_guardrails, active_audit),
+    )
+    builder.add_node("human_approval", _make_human_approval_node(active_audit))
+    builder.add_node(
+        "execute_remediation",
+        _make_live_execute_node(session, active_guardrails, active_audit),
+    )
     builder.add_node("abort_remediation", abort_remediation_node)
 
     builder.add_edge(START, "supervisor")
@@ -346,9 +491,12 @@ async def run_live_incident_turn(
     db_path: str | Path = ".incident_checkpoints.sqlite",
     infra_state_path: Path | None = None,
     llm: BaseChatModel | None = None,
+    guardrails: ActionGuardrails | None = None,
+    audit_log_path: str | Path = ".incident_audit.jsonl",
 ) -> dict[str, Any]:
     """Run an incident report against the live stdio MCP server and async SQLite checkpointer."""
     config = {"configurable": {"thread_id": thread_id}}
+    audit_logger = AuditLogger(audit_log_path)
     async with (
         open_mcp_stdio_session(infra_state_path=infra_state_path) as session,
         open_async_sqlite_checkpointer(db_path) as checkpointer,
@@ -357,6 +505,8 @@ async def run_live_incident_turn(
             session=session,
             llm=llm,
             checkpointer=checkpointer,
+            guardrails=guardrails,
+            audit_logger=audit_logger,
         )
         return await graph.ainvoke(
             initial_incident_state(HumanMessage(content=report)),

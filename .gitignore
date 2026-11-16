@@ -33,3 +33,5 @@ Thumbs.db
 
 # Simulated infrastructure runtime state
 .infra_state.json
+
+.incident_audit.jsonl

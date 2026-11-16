@@ -12,3 +12,11 @@
 
 ## Next Step (Milestone 5 — Guardrails & Audit Trail)
 - Add input/action validation guardrails (service allowlists, replica bounds, rate/cooldown checks, and structured audit logging of every proposed, approved, rejected, and executed action).
+## Hito 5 — Guardrails y Auditoría (Completado)
+- **`src/incident_responder/guardrails.py`**:
+  - `GuardrailPolicy` y `ActionGuardrails`: validación determinista de allowlist de servicios (`payment-api`, `auth-service`, `inventory-db`), allowlist de herramientas de escritura (`rollback_deployment`, `restart_service`, `scale_service`), límites de réplicas (`1..10`), ventana de enfriamiento (`cooldown_seconds`) por `(service, tool)` y límite máximo de acciones por hilo (`max_actions_per_thread`).
+  - `AuditLogger`: registro estructurado en formato JSON Lines (`.incident_audit.jsonl`) con `timestamp`, `event` (`PROPOSED`, `GUARDRAIL_BLOCKED`, `APPROVED`, `REJECTED`, `EXECUTED`, `EXECUTION_FAILED`), `thread_id`, `service`, `tool`, `args`, `actor` y `details`.
+- **`src/incident_responder/supervisor.py`**:
+  - Validación de guardrails tras `remediation_planner` (bloqueando acciones fuera de política antes de molestar al operador humano) y defensa en profundidad justo antes de `execute_remediation`.
+  - Trazabilidad completa de eventos en cada transición del ciclo de vida (`planner`, `guardrail`, `human`, `executor`).
+- **`tests/test_guardrails_audit.py`**: 4 nuevos tests (18 passed en total, `ruff` limpio).
