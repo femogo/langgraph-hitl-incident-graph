@@ -1,25 +1,13 @@
-# Project Progress — incident-responder-agent
+# Project Progress - incident-responder-agent
 
 ## Completed Milestones
-- **Milestone 0 — Skeleton & ADR (2026-11-14):**
-  - Initialized local Git repository (main) and Python project with uv (src/ layout).
-  - Configured .gitignore and .gitattributes (UTF-8 / LF normalization on Windows 11) ensuring .env, .venv/, and local SQLite/JSON runtime files are never tracked.
-  - Built typed environment configuration with pydantic-settings (src/incident_responder/config.py) supporting local Ollama models via .env.
-  - Added smoke & configuration override tests (tests/test_smoke.py) and verified linting with ruff.
-  - Documented core architectural choices in docs/adr/0001-architecture-and-mcp-transport.md.
-- **Milestone 1 — Simulated Infrastructure + stdio MCP Server (2026-11-16):**
-  - Installed official MCP Python SDK (mcp==2.3.0) and pytest-asyncio.
-  - Built deterministic, JSON-persisted simulated infrastructure (src/incident_responder/infra.py) with 3 microservices (auth-service, degraded payment-api with v2.3.1 memory leak, inventory-db).
-  - Implemented custom stdio MCP server using MCPServer (src/incident_responder/mcp_server.py) exposing 3 read-only diagnostic tools and 3 state-mutating remediation tools, routing all logs strictly to stderr.
-  - Added end-to-end stdio subprocess integration tests (tests/test_mcp_server.py); all 5 tests passing and ruff clean.
-
-## Key Decisions & Rationale
-- **Supervisor Multi-Agent Graph (LangGraph):** Separates read-only diagnostics from state-mutating remediation instead of using a single monolithic ReAct loop.
-- **Custom MCP Server over stdio (mcp 2.x MCPServer):** Isolates infrastructure tools in a local subprocess; server logs go strictly to stderr so stdout carries clean JSON-RPC frames on Windows.
-- **Persistent Checkpointing + HITL (SqliteSaver + interrupt()):** Enables pausing execution prior to write actions and resuming across process restarts.
+- Milestone 0 - Skeleton and ADR (2026-11-14): Initialized local Git repository (main) and Python project with uv (src/ layout), typed settings (src/incident_responder/config.py), smoke tests, and docs/adr/0001-architecture-and-mcp-transport.md.
+- Milestone 1 - Simulated Infrastructure and stdio MCP Server (2026-11-15): Built stateful JSON-backed simulated infrastructure (src/incident_responder/infra.py) and custom stdio MCP server (src/incident_responder/mcp_server.py, mcp==2.3.0) with 3 read-only and 3 write tools (tests/test_mcp_server.py).
+- Milestone 2 - Typed Graph State and SQLite Checkpointer (2026-11-16): Defined IncidentState (src/incident_responder/state.py) with add_messages reducer and SqliteSaver / AsyncSqliteSaver context managers (tests/test_state_checkpoint.py).
+- Milestone 3 - Human-in-the-Loop (HITL) Approval Gate (2026-11-16): Extended src/incident_responder/graph.py with propose_remediation, human_approval (using langgraph.types.interrupt()), route_after_approval, execute_remediation, and abort_remediation; verified with tests/test_hitl_approval.py (11 passed, ruff clean).
 
 ## Pinned Dependencies
-- Python: 3.11.0 | mcp: 2.3.0 | pydantic: 2.14.3 | pydantic-settings: 2.16.3 | pytest: 9.2.0 | pytest-asyncio: 1.3.0 | ruff: 0.17.5
+- Python: 3.11.0 | mcp: 2.3.0 | langgraph: 1.2.22 | langchain-ollama: 1.1.0 | langgraph-checkpoint-sqlite: 3.1.3 | pydantic: 2.14.3 | pydantic-settings: 2.16.3 | pytest: 9.2.0 | ruff: 0.17.5
 
-## Next Step (Milestone 2)
-- Install LangGraph + Ollama integration (langgraph, langchain-ollama, langgraph-checkpoint-sqlite) and build the multi-agent Supervisor graph with Human-in-the-Loop interrupt() gates before write tools.
+## Next Step (Milestone 4 - Multi-Agent Supervisor + Local Ollama + Live MCP Tools)
+- Connect ChatOllama and the stdio MCP client session to the LangGraph Supervisor workflow so read-only diagnostic subagents inspect live service metrics/logs before proposing gated remediation actions.
